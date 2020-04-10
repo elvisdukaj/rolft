@@ -229,10 +229,21 @@ class FileTransferSession : std::enable_shared_from_this<FileTransferSession> {
 
 class Server {
  public:
-  Server(net::io_context& ioContext) : ioContext_{ioContext} {}
+  Server(net::io_context& ioContext, net::ip::tcp::endpoint endpont)
+      : ioContext_{ioContext}, acceptor_{ioContext_, endpont} {}
+
+ private:
+  void accept() {
+    acceptor_.async_accept([this](boost::system::error_code ec, net::ip::tcp::socket socket) {
+      if (!ec) std::make_shared<FileTransferSession>(std::move(socket));
+      accept();
+    });
+    ;
+  }
 
  private:
   net::io_context& ioContext_;
+  net::ip::tcp::acceptor acceptor_;
 };
 
 int main(int argc, char* argv[]) {
@@ -244,8 +255,8 @@ int main(int argc, char* argv[]) {
 
     boost::asio::io_context io_context;
 
-    Server server(io_context);
     net::ip::tcp::endpoint endpoint(net::ip::tcp::v4(), std::atoi(argv[1]));
+    Server server(io_context, endpoint);
 
     io_context.run();
   } catch (std::exception& e) {
