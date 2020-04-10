@@ -1,36 +1,42 @@
 #include "MessageHeader.h"
 
+#include <fmt/format.h>
 #include <boost/asio.hpp>
 #include <boost/filesystem.hpp>
 
 #include <cstdlib>
-#include <iostream>
 
 namespace net = boost::asio;
 using net::ip::tcp;
 
 class Client {
  public:
-  Client(net::io_context& io_context, const tcp::resolver::results_type& endpoints, boost::filesystem::path&& file)
-      : io_context_(io_context), socket_(io_context_), file_{std::move(file)} {
-    net::async_connect(socket_, endpoints, [this](boost::system::error_code, tcp::endpoint) { sendMessageHeader(); });
+  Client(net::io_context& io_context, const tcp::resolver::results_type& endpoints, boost::filesystem::path file,
+         int64_t chunkSize = 1024 * 1024)
+      : CHUNK_SIZE{chunkSize}, io_context_(io_context), socket_(io_context_), file_{std::move(file)} {
+    memset(&messageHeader_, 0, sizeof(MessageHeader));
+    net::async_connect(socket_, endpoints, [this](boost::system::error_code, tcp::endpoint) {
+      fmt::print("Client connected with the server\n");
+      sendMessageHeader();
+    });
   }
 
  private:
   void sendMessageHeader() {
     // Prepare message
-    MessageHeader header;
-    header.fileLength = boost::filesystem::file_size(file_);
+    messageHeader_.fileLength = boost::filesystem::file_size(file_);
     auto filename = file_.filename().string();
-    std::copy(std::begin(filename), std::end(filename), header.data());
+    std::copy(std::begin(filename), std::end(filename), messageHeader_.data());
 
-    net::async_write(socket_, net::buffer(header.data(), header.length()),
-                     [this](boost::system::error_code, size_t) { sendChunkHeader(); });
+    net::async_write(socket_, net::buffer(messageHeader_.data(), messageHeader_.length()),
+                     [this](boost::system::error_code, size_t) {
+                       fmt::print("Writing message header. filename: {}, file size: {}",
+                                  std::string{messageHeader_.fileName}, messageHeader_.length());
+                       sendChunks();
+                     });
   }
 
-  void sendChunkHeader() {
-    static std::size_t CHUNK_SIZE = 1024 * 1024;  // CHUNKS are 1 MByte
-
+  void sendChunks() {
     std::ifstream file(file_.string(), std::fstream::binary);
 
     int64_t index = 0;
@@ -53,33 +59,34 @@ class Client {
 
       // send the header
       net::async_write(socket_, net::buffer(chunkHeader.data(), chunkHeader.length()),
-                       [this, chunkBuffer = std::move(chunk)](boost::system::error_code, size_t) mutable {
-                         sendChunkBody(std::move(chunkBuffer));
+                       [this, chunkBuffer = std::move(chunk), chunkHeader](boost::system::error_code, size_t) mutable {
+                         fmt::print("Sending chunk index: {}, offset: {}, size: {}\n", chunkHeader.index,
+                                    chunkHeader.offset, chunkHeader.size);
+
+                         // send the chunk data
+                         net::async_write(socket_, net::buffer(chunkBuffer),
+                                          [](boost::system::error_code, size_t transferedBytes) {
+                                            fmt::print("Sent chunk body: {} bytes\n", transferedBytes);
+                                          });
                        });
     }
-  }
-
-  void sendChunkBody(ChunkBuffer&& chunk) {
-    // write the chink
-    net::async_write(socket_, net::buffer(chunk), [](boost::system::error_code, size_t) {});
-  }
-
-  void sendEmptyChunk() {
     // send the header
     net::async_write(socket_, net::buffer(EOF_CHUNK.data(), EOF_CHUNK.length()),
                      [](boost::system::error_code, size_t) {});
   }
 
  private:
+  const int64_t CHUNK_SIZE;
   boost::asio::io_context& io_context_;
   tcp::socket socket_;
   boost::filesystem::path file_;
+  MessageHeader messageHeader_;
 };
 
 int main(int argc, char* argv[]) {
   try {
     if (argc != 4) {
-      std::cerr << "Usage: chat_client <host> <port> <filename>\n";
+      fmt::print("Usage: chat_client <host> <port> <filename>\n");
       return 1;
     }
 
@@ -97,7 +104,7 @@ int main(int argc, char* argv[]) {
     io_context.run();
 
   } catch (std::exception& e) {
-    std::cerr << "Exception: " << e.what() << "\n";
+    fmt::print("Exception: {}\n", e.what());
   }
 
   return 0;
