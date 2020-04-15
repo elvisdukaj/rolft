@@ -2,116 +2,124 @@
 
 #include <fmt/format.h>
 #include <boost/asio.hpp>
-#include <boost/filesystem.hpp>
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <queue>
+
+using ChunkHeaderQueue = std::queue<ChunkHeader>;
+using ChunkBufferQueue = std::queue<ChunkBuffer>;
 
 namespace net = boost::asio;
+namespace fs = std::filesystem;
 using net::ip::tcp;
 
 class Client {
  public:
-  Client(net::io_context& io_context, const tcp::resolver::results_type& endpoints, boost::filesystem::path file,
-         int64_t chunkSize = 1024 * 1024)
-      : CHUNK_SIZE{chunkSize}, io_context_(io_context), socket_(io_context_), file_{std::move(file)} {
-    net::async_connect(socket_, endpoints, [this](const boost::system::error_code& ec, tcp::endpoint) {
+  Client(net::io_context &io_context, const tcp::resolver::results_type &endpoints,
+         const fs::path &file, int64_t chunkSize = 1024 * 1024)
+      : CHUNK_SIZE{chunkSize},
+        io_context_(io_context),
+        socket_(io_context_),
+        filePath_{file},
+        chunkIndex_{0ll} {
+    net::async_connect(socket_, endpoints, [this](const auto &ec, auto) {
       if (ec) {
-        fmt::print("An error occured during message connection: {}\n", ec.message());
+        fmt::print(
+            "An error occured during message "
+            "connection: {}\n",
+            ec.message());
         return;
       }
 
       fmt::print("Client connected esablished\n");
       sendMessageHeader();
-      //      sendChunks();
     });
   }
 
  private:
   void sendMessageHeader() {
     // Prepare message
-    messageHeader_.fileLength = boost::filesystem::file_size(file_);
-    auto filename = file_.filename().string();
+    messageHeader_.fileLength = fs::file_size(filePath_);
+    auto filename = filePath_.filename().string();
     std::copy(std::begin(filename), std::end(filename), messageHeader_.fileName);
 
     net::async_write(socket_, net::buffer(messageHeader_.data(), messageHeader_.length()),
-                     [this](const boost::system::error_code& ec, size_t transferedBytes) {
+                     [this](const auto &ec, auto transferedBytes) {
                        if (ec) {
-                         fmt::print("An error occured during message header transfer: {}\n", ec.message());
+                         fmt::print(
+                             "An error occured during message "
+                             "header transfer: {}\n",
+                             ec.message());
                          return;
                        }
 
-                       fmt::print("Header: {} - message header. filename: {}, file size: {}\n", transferedBytes,
-                                  std::string{messageHeader_.fileName}, messageHeader_.fileLength);
-                       sendChunks();
+                       fmt::print(
+                           "Header: {} - message header. "
+                           "filename: {}, file size: {}\n",
+                           transferedBytes, std::string{messageHeader_.fileName},
+                           messageHeader_.fileLength);
+
+                       file_ = std::ifstream{filePath_, std::ios::binary};
+                       sendFile();
                      });
   }
 
-  void sendChunks() {
-    std::ifstream file(file_.string(), std::fstream::binary);
+  void sendFile() {
+    if (!file_) return;
 
-    int64_t index = 0;
+    // prepare the chunk header
+    chunkHeaderQueue_.emplace();
+    chunkBufferQueue_.emplace();
+    auto &body = chunkBufferQueue_.front();
+    auto &header = chunkHeaderQueue_.front();
 
-    while (file) {
-      // prepare the chunk header
-      ChunkHeader chunkHeader;
-      chunkHeader.index = index++;
-      chunkHeader.offset = file.tellg();
+    header.index = chunkIndex_++;
+    header.offset = file_.tellg();
 
-      // buffer to store the chunk
-      ChunkBuffer chunk;
-      chunk.resize(CHUNK_SIZE);
+    body.resize(CHUNK_SIZE);
 
-      // read the chunk from the file
-      file.read(chunk.data(), CHUNK_SIZE);
-      chunkHeader.size = file.gcount();
-      chunk.resize(chunkHeader.size);
+    // read the chunk from the file
+    file_.read(body.data(), CHUNK_SIZE);
+    header.size = file_.gcount();
+    body.resize(header.size);
 
-      // send the header
-      net::async_write(
-          socket_, net::buffer(chunkHeader.data(), chunkHeader.length()),
-          [this, chunkHeader, chunk = std::move(chunk)](const boost::system::error_code& ec, size_t transferedBytes) {
-            if (ec) {
-              fmt::format("Error durin trasmission: {}\n", ec.message());
-              return;
-            }
+    std::array<net::const_buffer, 2> chunk = {net::buffer(header.data(), header.length()),
+                                              net::buffer(body)};
 
-            fmt::print("Sent {} bytes of chunk index: {}, offset: {}, size: {}\n", transferedBytes, chunkHeader.index,
-                       chunkHeader.offset, chunkHeader.size);
+    net::async_write(socket_, chunk, [this](const auto &ec, auto transferedBytes) {
+      if (ec) {
+        fmt::print("An error occured during write: {}\n", ec.message());
+        return;
+      }
 
-            fmt::print("Sending chunk body ({})\n", chunk.size());
+      auto &body = chunkBufferQueue_.front();
+      auto &header = chunkHeaderQueue_.front();
 
-            net::async_write(socket_, net::buffer(chunk),
-                             [](const boost::system::error_code& ec, size_t transferedBytes) {
-                               if (ec) {
-                                 fmt::format("Error durin trasmission: {}\n", ec.message());
-                                 return;
-                               }
+      fmt::print("Send a chunk {} bytes: header: {{{} {} {}}}, body {} bytes\n", transferedBytes,
+                 header.index, header.offset, header.size, body.size());
+      //      std::cout << "Sent a chunk of " << transferedBytes << " bytes" << std::endl;
+      //      std::this_thread::sleep_for(std::chrono::seconds{1});
 
-                               fmt::print("Sent chunk body: {} bytes\n", transferedBytes);
-                             });
-          });
-    }
-    // send the header
-    net::async_write(socket_, net::buffer(EOF_CHUNK.data(), EOF_CHUNK.length()),
-                     [](const boost::system::error_code& ec, size_t) {
-                       if (ec) {
-                         fmt::format("An error occured during eof chunk: {}\n", ec.message());
-                         return;
-                       }
-                       fmt::print("EOF chunk\n");
-                     });
+      sendFile();
+    });
   }
 
  private:
   const int64_t CHUNK_SIZE;
-  boost::asio::io_context& io_context_;
+  boost::asio::io_context &io_context_;
   tcp::socket socket_;
-  boost::filesystem::path file_;
+  std::ifstream file_;
+  fs::path filePath_;
   MessageHeader messageHeader_;
+  ChunkHeaderQueue chunkHeaderQueue_;
+  ChunkBufferQueue chunkBufferQueue_;
+  int64_t chunkIndex_;
 };
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
   try {
     if (argc != 4) {
       fmt::print("Usage: client <host> <port> <filename>\n");
@@ -131,7 +139,9 @@ int main(int argc, char* argv[]) {
     // it will block until all async operation will be done!
     io_context.run();
 
-  } catch (std::exception& e) {
+    std::cout << std::endl;
+
+  } catch (std::exception &e) {
     fmt::print("Exception: {}\n", e.what());
   }
 
