@@ -24,7 +24,8 @@ class Client {
         io_context_(io_context),
         socket_(io_context_),
         filePath_{file},
-        chunkIndex_{0ll} {
+        chunkIndex_{0ll},
+        totalTransferredBytes_{0ll} {
     net::async_connect(socket_, endpoints, [this](const auto &ec, auto) {
       if (ec) {
         fmt::print(
@@ -38,6 +39,8 @@ class Client {
       sendMessageHeader();
     });
   }
+
+  ~Client() { fmt::print("Done"); }
 
  private:
   void sendMessageHeader() {
@@ -73,8 +76,8 @@ class Client {
     // prepare the chunk header
     chunkHeaderQueue_.emplace();
     chunkBufferQueue_.emplace();
-    auto &body = chunkBufferQueue_.front();
     auto &header = chunkHeaderQueue_.front();
+    auto &body = chunkBufferQueue_.front();
 
     header.index = chunkIndex_++;
     header.offset = file_.tellg();
@@ -98,10 +101,15 @@ class Client {
       auto &body = chunkBufferQueue_.front();
       auto &header = chunkHeaderQueue_.front();
 
-      fmt::print("Send a chunk {} bytes: header: {{{} {} {}}}, body {} bytes\n", transferedBytes,
-                 header.index, header.offset, header.size, body.size());
-      //      std::cout << "Sent a chunk of " << transferedBytes << " bytes" << std::endl;
-      //      std::this_thread::sleep_for(std::chrono::seconds{1});
+      fmt::print("Send a chunk {:7} bytes: header: {{{:3} {:7} {:7}}}, body {:7} bytes\n",
+                 transferedBytes, header.index, header.offset, header.size, body.size());
+
+      totalTransferredBytes_ += body.size();
+
+      if (totalTransferredBytes_ == messageHeader_.fileLength) {
+        fmt::print("Trasmission complete");
+        return;
+      }
 
       sendFile();
     });
@@ -117,6 +125,7 @@ class Client {
   ChunkHeaderQueue chunkHeaderQueue_;
   ChunkBufferQueue chunkBufferQueue_;
   int64_t chunkIndex_;
+  int64_t totalTransferredBytes_;
 };
 
 int main(int argc, char *argv[]) {

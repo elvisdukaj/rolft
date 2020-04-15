@@ -9,7 +9,10 @@ namespace net = boost::asio;
 
 class FileTransferSession : public std::enable_shared_from_this<FileTransferSession> {
  public:
-  FileTransferSession(net::ip::tcp::socket socket) : socket_{std::move(socket)} {}
+  FileTransferSession(net::ip::tcp::socket socket)
+      : socket_{std::move(socket)}, totalReceivedBytes_{0ll} {}
+
+  ~FileTransferSession() { fmt::print("All data has been read\n"); }
 
   void start() { readMessageHeader(); }
 
@@ -42,10 +45,10 @@ class FileTransferSession : public std::enable_shared_from_this<FileTransferSess
             return;
           }
 
-          fmt::print("Read {} bytes chunk header: index: {}, offset: {}, size: {}\n", transferedBytes, header->index,
-                     header->offset, header->size);
+          fmt::print("Read {} bytes chunk header: index: {:3}, offset: {:7}, size: {:7}\n",
+                     transferedBytes, header->index, header->offset, header->size);
 
-          if (header->size != 0) self->readChunkBody(std::move(file), *header);
+          self->readChunkBody(std::move(file), *header);
         });
   }
 
@@ -62,9 +65,16 @@ class FileTransferSession : public std::enable_shared_from_this<FileTransferSess
             return;
           }
 
-          fmt::print("Read chunk body [{}]\n", transferedBytes);
+          fmt::print("Read chunk body {:7} bytes]\n", transferedBytes);
 
           file.write(buffer->data(), buffer->size());
+
+          self->totalReceivedBytes_ += transferedBytes;
+
+          if (self->totalReceivedBytes_ == self->messageHeader_.fileLength) {
+            fmt::print("Received all data\n");
+            return;
+          }
 
           // read a new chunk header
           self->readChunkHeader(std::move(file));
@@ -74,6 +84,7 @@ class FileTransferSession : public std::enable_shared_from_this<FileTransferSess
  private:
   net::ip::tcp::socket socket_;
   MessageHeader messageHeader_;
+  int64_t totalReceivedBytes_;
 };
 
 class Server {
@@ -113,7 +124,10 @@ int main(int argc, char *argv[]) {
     Server server(ioContext, endpoint);
 
     net::signal_set signals(ioContext, SIGINT, SIGTERM);
-    signals.async_wait([&ioContext](const auto &ec, int sig) { ioContext.stop(); });
+    signals.async_wait([&ioContext](const auto &, int) {
+      fmt::print("All jobs are done!");
+      ioContext.stop();
+    });
 
     ioContext.run();
 
